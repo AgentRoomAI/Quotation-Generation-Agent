@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cart</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<div class="container py-4">
+    <h2 class="mb-4">Shopping Cart</h2>
+    {% if cart_items %}
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Product</th>
+                <th>Qty</th>
+                <th>Unit Price</th>
+                <th>Total</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in cart_items %}
+            <tr>
+                <td>{{ item.product.name }}</td>
+                <td>
+                    <form method="post" action="{{ url_for('update_cart', product_id=item.product.id) }}" class="d-flex gap-2">
+                        <input type="number" class="form-control form-control-sm" name="quantity" value="{{ item.quantity }}" min="1" style="max-width: 90px;">
+                        <button class="btn btn-sm btn-outline-primary" type="submit">Update</button>
+                    </form>
+                </td>
+                <td>₹{{ "{:,.2f}".format(item.product.price) }}</td>
+                <td>₹{{ "{:,.2f}".format(item.product.price * item.quantity) }}</td>
+                <td><a class="btn btn-sm btn-danger" href="{{ url_for('remove_cart', product_id=item.product.id) }}">Remove</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <div class="card p-3 mt-4">
+        <p><strong>Subtotal:</strong> ₹{{ "{:,.2f}".format(subtotal) }}</p>
+        <p><strong>GST:</strong> ₹{{ "{:,.2f}".format(gst_total) }}</p>
+        <p><strong>Shipping:</strong> ₹{{ "{:,.2f}".format(shipping) }}</p>
+        <p><strong>Grand Total:</strong> ₹{{ "{:,.2f}".format(grand_total) }}</p>
+        <p class="text-muted mb-3">Review the cart carefully. The quotation PDF will be created only when you confirm below.</p>
+        <form method="post" action="{{ url_for('confirm_quotation') }}">
+            <div class="mb-3">
+                <label class="form-label">Customer Name</label>
+                <input type="text" class="form-control" name="customer_name" placeholder="Enter customer name">
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+                <button class="btn btn-success" type="submit">Confirm and Generate Quotation</button>
+                <button class="btn btn-outline-danger" type="submit" formaction="{{ url_for('clear_cart') }}" formmethod="post">Clear Cart</button>
+            </div>
+        </form>
+    </div>
+    {% else %}
+    <div class="alert alert-warning">Your cart is empty.</div>
+    {% endif %}
+    <a class="btn btn-outline-secondary mt-3" href="{{ url_for('index') }}">Back to Products</a>
+</div>
+</body>
+</html>
