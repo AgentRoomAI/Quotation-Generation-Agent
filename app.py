@@ -1,8 +1,10 @@
 import os
 import re
 import uuid
+import logging
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, session, send_from_directory
+from typing import List, Dict, Tuple
 
 from chatbot import QuotationChatbot
 from database import DatabaseManager
@@ -13,6 +15,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "quotation-agent-secret-key")
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "pdfs")
 
+# Configure basic logging for debugging and production observability
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Initialize shared app services.
 
 chatbot = QuotationChatbot()
@@ -20,7 +26,7 @@ db = DatabaseManager()
 pdf_generator = QuotationPDFGenerator(output_dir=app.config["UPLOAD_FOLDER"])
 
 
-def _get_session_cart() -> list[dict]:
+def _get_session_cart() -> List[Dict]:
     if "cart" not in session:
         session["cart"] = []
     return session["cart"]
@@ -30,7 +36,7 @@ def _clear_session_cart() -> None:
     session["cart"] = []
 
 
-def _calculate_summary(cart_items: list[dict]) -> dict:
+def _calculate_summary(cart_items: List[Dict]) -> Dict[str, float]:
     subtotal = sum(item["product"].price * item["quantity"] for item in cart_items)
     gst_total = sum((item["product"].price * item["quantity"]) * (item["product"].gst / 100) for item in cart_items)
     shipping = 25.0 if subtotal > 0 else 0.0
@@ -67,7 +73,7 @@ def _build_cart_items_from_session():
     return cart_items
 
 
-def _generate_quotation_pdf(customer_name: str = "Customer") -> tuple[str, str]:
+def _generate_quotation_pdf(customer_name: str = "Customer") -> Tuple[str, str]:
     cart_items = _build_cart_items_from_session()
     if not cart_items:
         return "", ""
@@ -158,6 +164,85 @@ def _find_best_product(term: str):
     return None
 
 
+def _find_best_products(term: str, limit: int = 1):
+    """Return up to `limit` distinct products that best match `term`.
+
+    This reuses the scoring logic from `_find_best_product` but returns
+    a list so callers can select multiple different products when a user
+    requests multiple units.
+    """
+    if not term or limit <= 0:
+        return []
+
+    normalized_term = term.lower().strip()
+    search_terms = [normalized_term]
+    if normalized_term.endswith("s"):
+        search_terms.append(normalized_term[:-1])
+    if normalized_term.endswith("es") and len(normalized_term) > 3:
+        search_terms.append(normalized_term[:-2])
+
+    generic_synonyms = {
+        "phone": ["phone", "smartphone", "mobile", "android"],
+        "phones": ["phone", "smartphone", "mobile", "android"],
+        "smartwatch": ["watch", "smartwatch", "fitness"],
+        "smart watches": ["watch", "smartwatch", "fitness"],
+        "watch": ["watch", "smartwatch", "fitness"],
+        "watches": ["watch", "smartwatch", "fitness"],
+        "laptop": ["laptop", "notebook"],
+        "laptops": ["laptop", "notebook"],
+        "printer": ["printer"],
+        "printers": ["printer"],
+        "monitor": ["monitor"],
+        "monitors": ["monitor"],
+        "speaker": ["speaker"],
+        "speakers": ["speaker"],
+        "headphone": ["headphone"],
+        "headphones": ["headphone"],
+        "earbud": ["earbud"],
+        "earbuds": ["earbud"],
+        "camera": ["camera"],
+        "cameras": ["camera"],
+        "console": ["console", "gaming"],
+        "consoles": ["console", "gaming"],
+        "router": ["router", "wifi"],
+        "routers": ["router", "wifi"],
+    }
+
+    term_tokens = set(re.findall(r"[a-z0-9]+", normalized_term))
+    scored_matches = []
+    for product in db.list_products():
+        name_text = f"{product.name} {product.sku}".lower()
+        description_text = product.description.lower()
+        product_tokens = set(re.findall(r"[a-z0-9]+", f"{product.name} {product.description} {product.sku}".lower()))
+        score = 0
+
+        if normalized_term and normalized_term in name_text:
+            score += 10
+
+        for search_term in search_terms:
+            if search_term in name_text:
+                score += 4
+            elif search_term in description_text:
+                score += 1
+
+        if term_tokens:
+            score += len(term_tokens & set(re.findall(r"[a-z0-9]+", product.name.lower()))) * 4
+            score += len(term_tokens & product_tokens) * 2
+
+        keywords = generic_synonyms.get(normalized_term, [])
+        if keywords and any(keyword in f"{product.name} {product.description} {product.sku}".lower() for keyword in keywords):
+            score += 2
+
+        if score > 0:
+            scored_matches.append((score, product))
+
+    if not scored_matches:
+        return []
+
+    scored_matches.sort(key=lambda item: (-item[0], item[1].name))
+    return [p for _, p in scored_matches[:limit]]
+
+
 def _add_products_from_message(message: str):
     parsed = chatbot.parse_message(message)
     requested_items = parsed.get("products", [])
@@ -165,19 +250,42 @@ def _add_products_from_message(message: str):
 
     if requested_items:
         for product_name, quantity in requested_items:
-            matched = _find_best_product(product_name)
-            if matched:
-                products_to_add.append((matched, max(1, quantity)))
+            quantity = max(1, quantity)
+            if quantity == 1:
+                matched = _find_best_product(product_name)
+                if matched:
+                    products_to_add.append((matched, 1))
+            else:
+                # Try to find up to `quantity` distinct products matching the term.
+                matches = _find_best_products(product_name, limit=quantity)
+                if matches:
+                    for m in matches:
+                        products_to_add.append((m, 1))
+                else:
+                    # No distinct matches — fall back to the single best product once.
+                    best = _find_best_product(product_name)
+                    if best:
+                        products_to_add.append((best, 1))
     else:
         chunks = [chunk.strip() for chunk in re.split(r"\b(?:and|or|,|;)\b", message.lower()) if chunk.strip()]
         for chunk in chunks:
             quantity_match = re.search(r"(\d+)\s+(.+)", chunk)
             if quantity_match:
-                quantity = int(quantity_match.group(1))
+                quantity = max(1, int(quantity_match.group(1)))
                 product_name = quantity_match.group(2).strip()
-                matched = _find_best_product(product_name)
-                if matched:
-                    products_to_add.append((matched, max(1, quantity)))
+                if quantity == 1:
+                    matched = _find_best_product(product_name)
+                    if matched:
+                        products_to_add.append((matched, 1))
+                else:
+                    matches = _find_best_products(product_name, limit=quantity)
+                    if matches:
+                        for m in matches:
+                            products_to_add.append((m, 1))
+                    else:
+                        best = _find_best_product(product_name)
+                        if best:
+                            products_to_add.append((best, 1))
             else:
                 matched = _find_best_product(chunk)
                 if matched:
@@ -199,7 +307,7 @@ def _add_products_from_message(message: str):
     return parsed, products_to_add
 
 
-def _summarize_search_results(message: str) -> list[dict]:
+def _summarize_search_results(message: str) -> List[Dict]:
     words = [word for word in re.findall(r"[a-z0-9]+", message.lower()) if len(word) > 2]
     scored_products = []
     for product in db.list_products():
@@ -267,28 +375,51 @@ def ai_search():
     if not message:
         return redirect(url_for("index"))
 
-    parsed, products_to_add = _add_products_from_message(message)
+    try:
+        # Maintain conversation history in the Flask session (list of {role, content}).
+        if "conversation" not in session:
+            session["conversation"] = []
 
-    if products_to_add:
-        cart_items = session["cart"]
-        for product, quantity in products_to_add:
-            found = False
-            for item in cart_items:
-                if item["product_id"] == product.id:
-                    item["quantity"] += quantity
-                    found = True
-                    break
-            if not found:
-                cart_items.append({"product_id": product.id, "quantity": quantity})
-        session["cart"] = cart_items
+        # Call the LLM to get an assistant reply (model must only infer intent).
+        assistant_reply = chatbot.get_llm_response(message, session.get("conversation", []))
 
-    session["last_products"] = [product.name for product, _ in products_to_add[:3]]
-    session["last_message"] = message
-    session["last_intent"] = parsed["intent"]
-    session["last_suggestions"] = _summarize_search_results(message)
-    if products_to_add:
-        return redirect(url_for("cart"))
-    return redirect(url_for("index"))
+        # Append the user's message and assistant reply to conversation history.
+        conv = session.get("conversation", [])
+        conv.append({"role": "user", "content": message})
+        conv.append({"role": "assistant", "content": assistant_reply})
+        session["conversation"] = conv
+
+        # Use the deterministic parser to extract intent and products (Python enforces facts).
+        parsed, products_to_add = _add_products_from_message(message)
+
+        # If products were identified, merge them into the session cart.
+        if products_to_add:
+            cart_items = session["cart"]
+            for product, quantity in products_to_add:
+                found = False
+                for item in cart_items:
+                    if item["product_id"] == product.id:
+                        item["quantity"] += quantity
+                        found = True
+                        break
+                if not found:
+                    cart_items.append({"product_id": product.id, "quantity": quantity})
+            session["cart"] = cart_items
+
+        # Update session metadata for UI
+        session["last_products"] = [product.name for product, _ in products_to_add[:3]]
+        session["last_message"] = message
+        session["last_intent"] = parsed["intent"]
+        session["last_suggestions"] = _summarize_search_results(message)
+
+        if products_to_add:
+            return redirect(url_for("cart"))
+        return redirect(url_for("index"))
+    except Exception as exc:
+        logger.exception("Error processing AI search: %s", exc)
+        # On error, fall back to index view with the user's message stored.
+        session["last_message"] = message
+        return redirect(url_for("index"))
 
 
 @app.route("/add-to-cart/<int:product_id>", methods=["POST"])
