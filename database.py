@@ -307,6 +307,9 @@ class DatabaseManager:
 ("Apple iMac 24-inch All-in-One Desktop Computer", "APIM24", "All-in-one desktop computer with 24-inch 4.5K Retina display, Apple M3 chip, 16GB memory, 512GB SSD, 1080p FaceTime HD camera, studio-quality mics, and macOS. Premium desktop computer for executive desks and creative studios.", 149999.00, 8, 18),
 ("Asus ROG Strix G16 Gaming Desktop Computer", "ASROG16", "High-performance workstation gaming desktop computer with Intel Core i7 14th Gen, 32GB DDR5 RAM, 1TB SSD, NVIDIA GeForce RTX 4070 12GB graphics, liquid cooling, and transparent side panel. Extreme desktop computer for 3D rendering, AI modeling, and gaming.", 159999.00, 7, 18),
 
+            ]
+            if count >= len(sample_products):
+                return
 
             conn.executemany(
                 """
